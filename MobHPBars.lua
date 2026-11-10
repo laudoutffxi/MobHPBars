@@ -1,7 +1,7 @@
 --[[
-    MobHPBars - WoW-style enemy nameplates for FFXI (Ashita v4)
+    MobHPBars - HP bars over monsters for FFXI (Ashita v4)
 
-    - Small WoW-style health bar + name over every nearby monster
+    - Framed health bar + name over every nearby monster
     - Debuffs shown as small status icons under the bar
     - Your current target's plate is drawn larger, highlighted and on top
 
@@ -27,7 +27,7 @@
       /np icons <n>       base debuff icon size in px (default 14)
       /np round <n>       HP bar corner radius in px (default 2, 0 = square)
       /np hp              toggle HP % text on the bars
-      /np claim           toggle WoW claim colours (off = green bar)
+      /np claim           toggle claim colours (off = green bar)
       /np elite <name>    toggle a mob name as elite (gold border)
       /np boss <name>     toggle a mob name as NM/boss (ornate frame, red bar)
       /np frames          toggle image frames (assets/frame_*.png) vs shape style
@@ -41,7 +41,7 @@
 addon.name    = 'MobHPBars'
 addon.author  = 'Laudout'
 addon.version = '3.1'
-addon.desc    = 'WoW-style enemy nameplates with debuff icons; target plate is enlarged.'
+addon.desc    = 'HP bars over monsters with debuff icons, target glow and arrow.'
 addon.link    = ''
 
 require('common')
@@ -75,7 +75,7 @@ local defaults = T{
     show_arrow     = true,  -- bobbing arrow above your target's plate
     glow_pulse     = true,  -- gently pulse the target glow
     boss_names     = T{},   -- names always shown as NM/boss (/np boss <name>)
-    claim_colours  = false, -- false = classic green bar, true = WoW red/yellow/grey by claim
+    claim_colours  = false, -- false = classic green bar, true = red/yellow/grey by claim
     icon_size      = 14,
     max_icons      = 5,     -- (old setting, no longer used)
     debuffs_per_row = 6,    -- debuff icons per row; more wrap onto another row and the plate moves up
@@ -107,9 +107,9 @@ end
 local COL = {
     border      = rgba(0, 0, 0, 230),
     bg          = rgba(25, 25, 25, 200),
-    hostile     = rgba(204, 26, 26, 255),     -- claimed by you / party (WoW red)
-    neutral     = rgba(230, 200, 30, 255),    -- unclaimed (WoW yellow)
-    tapped      = rgba(128, 128, 128, 255),   -- claimed by someone else (WoW grey "tapped")
+    hostile     = rgba(204, 26, 26, 255),     -- claimed by you / party (red)
+    neutral     = rgba(230, 200, 30, 255),    -- unclaimed (yellow)
+    tapped      = rgba(128, 128, 128, 255),   -- claimed by someone else (grey)
     gloss       = rgba(255, 255, 255, 45),
     shade       = rgba(0, 0, 0, 60),
     target_glow = rgba(255, 255, 255, 255),

@@ -1,6 +1,6 @@
 # MobHPBars
 
-WoW-style HP bars over monsters for Final Fantasy XI (Ashita v4).
+HP bars over monsters for Final Fantasy XI (Ashita v4).
 
 - Framed HP bar with the mob's name and HP % above every nearby monster
 - Debuff icons under the bar, 6 per row (the bar lifts to make room for extra rows)
