@@ -23,15 +23,15 @@
       /np pulse           toggle the target glow's gentle pulse
       /np distance <n>    max distance to show plates (default 30)
       /np scale <n>       target plate scale (default 1.1)
-      /np width <n>       base bar width in px (default 100)
+      /np width <n>       bar width in px (sleek 80, gold 100)
       /np icons <n>       base debuff icon size in px (default 14)
       /np round <n>       HP bar corner radius in px (default 2, 0 = square)
       /np hp              toggle HP % text on the bars
       /np claim           toggle claim colours (off = green bar)
       /np elite <name>    toggle a mob name as elite (gold border)
       /np boss <name>     toggle a mob name as NM/boss (ornate frame, red bar)
-      /np frames          toggle image frames (assets/frame_*.png) vs shape style
-      /np size <n>        image frame height in px (default 34)
+      /np style <name>    sleek (slim bar, name above) | gold (gold frame)
+      /np size <n>        height in px of the current style (sleek 5, gold 34)
       /np players         toggle plates over players (you, party, others)
       /np gamenames       toggle hiding the game's own monster names
       /np status          print diagnostics (camera, entity counts, errors)
@@ -40,7 +40,7 @@
 
 addon.name    = 'MobHPBars'
 addon.author  = 'Laudout'
-addon.version = '3.1'
+addon.version = '4.1'
 addon.desc    = 'HP bars over monsters with debuff icons, target glow and arrow.'
 addon.link    = ''
 
@@ -60,7 +60,9 @@ local defaults = T{
     plate_width    = 100,   -- HP bar width in px (the frame is built around it)
     plate_height   = 8,     -- HP bar height for the shape-drawn fallback style
     frame_height   = 34,    -- height in px of the image frame (assets/frame_*.png)
-    use_frames     = true,
+    sleek_px       = 5,     -- height in px of the sleek style's main bar
+    sleek_width    = 80,    -- width in px of the sleek style's bar (it still widens to fit long names)
+    style          = 'sleek', -- 'sleek' (slim bar, name above) or 'gold' (gold frame)
     hide_game_names = true, -- hide the game's own monster names (no plugin needed)
     show_players   = false, -- also draw plates over players (you, party, others)  -- false = draw plates with shapes instead of the image frames
     bar_rounding   = 2,     -- HP bar corner radius in px (square-rounded ends)
@@ -142,6 +144,7 @@ local COL = {
 
 -- Mob levels learned from /check results (FFXI doesn't send mob level otherwise)
 local levels = {}   -- levels[server_id] = level
+local trail = {}    -- trail[server_id] = sleek style's draining damage trail
 local hitbox = {}   -- hitbox[server_id] = hitbox size in yalms (from 0x00E byte 0x25, size x10)
 local nm_flag = {}  -- nm_flag[server_id] = true when /check says 'impossible to gauge'
 
@@ -381,6 +384,7 @@ ashita.events.register('packet_in', 'np_packet_in', function (e)
         levels = {}
         nm_flag = {}
         engaged = {}
+        trail = {}
         hitbox = {}
     end
 end)
@@ -471,6 +475,7 @@ local function text_size(text)
 end
 
 local function shadow_text(dl, x, y, col, text)
+    x, y = math.floor(x + 0.5), math.floor(y + 0.5)     -- whole pixels: no shimmer while moving
     dl:AddText({ x + 1, y + 1 }, COL.shadow, text)
     dl:AddText({ x, y }, col, text)
 end
@@ -503,16 +508,17 @@ end
 -- Draws every debuff icon centred on cx, wrapping onto extra rows when there are many.
 local function draw_debuff_icons(dl, list, cx, top, size, gap)
     local per_row = math.max(1, config.debuffs_per_row or 6)
+    size = math.floor(size + 0.5)                      -- whole pixels keep the icons steady
+    cx, top = math.floor(cx + 0.5), math.floor(top + 0.5)
     local n, row = #list, 0
     local i = 1
     while i <= n do
         local count = math.min(per_row, n - i + 1)
-        local ix = cx - (count * size + (count - 1) * gap) / 2
+        local ix = math.floor(cx - (count * size + (count - 1) * gap) / 2 + 0.5)
         local iy = top + row * (size + gap + 1)
         for k = i, i + count - 1 do
             local icon = get_status_icon(list[k].id)
             if icon ~= nil then
-                dl:AddRectFilled({ ix - 1, iy - 1 }, { ix + size + 1, iy + size + 1 }, COL.icon_border, 0)
                 dl:AddImage(icon.id, { ix, iy }, { ix + size, iy + size })
             end
             ix = ix + size + gap
@@ -670,10 +676,10 @@ local function draw_plate_framed(dl, sx, sy, p, tex)
     local name_l  = FRAME.name_x1 * k                                         -- name slot left (in left cap)
     local name_r  = FRAME.cap_l * k + M + (FRAME.name_x2 - FRAME.cap_r) * k   -- name slot right (in right cap)
     local name_cx = (name_l + name_r) / 2
-    local x0 = sx - name_cx
+    local x0 = math.floor(sx - name_cx + 0.5)
     -- Bottom-anchored: the frame and its debuff row sit fully above the point over the mob
     local icon_row = debuff_rows(p.server_id) * (config.icon_size * s + 3)       -- plate rises a row at a time
-    local y0 = sy - 3 - icon_row - FRAME.body_y2 * k
+    local y0 = math.floor(sy - 3 - icon_row - FRAME.body_y2 * k + 0.5)
     local y1 = y0 + H
 
     -- source x -> screen x (3-slice mapping)
@@ -761,13 +767,264 @@ local function draw_plate_framed(dl, sx, sy, p, tex)
     end
 end
 
-local function draw_plate(dl, sx, sy, p)
-    if config.use_frames then
-        local name = (p.rank == 'boss' and 'boss') or (p.rank == 'elite' and 'elite') or 'normal'
-        local tex = load_frame(name) or load_frame('normal')
-        if tex ~= nil then return draw_plate_framed(dl, sx, sy, p, tex) end
+-- "Sleek" style: name centred above on a soft dark backing, slim navy bar with fine metal tips,
+-- orange fill with a bright leading edge, and a pale "damage trail" that drains after each hit.
+local SLEEK = {
+    track      = rgba(22, 27, 44, 235),
+    edge       = rgba(205, 210, 222, 230),   -- fine pale-silver outline and tips
+    edge_el    = rgba(232, 194, 96, 240),    -- elite: gold
+    edge_bs    = rgba(232, 92, 70, 245),     -- NM / boss: crimson
+    fill       = rgba(222, 92, 56, 255),     -- orange-red
+    fill_hi    = rgba(255, 150, 80, 255),    -- bright leading edge
+    fill_bs    = rgba(214, 48, 40, 255),
+    fill_pc    = rgba(70, 190, 90, 255),
+    trail      = rgba(240, 236, 228, 210),   -- recently lost HP
+    name       = rgba(236, 236, 240, 255),
+    name_el    = rgba(255, 214, 120, 255),
+    name_bs    = rgba(255, 128, 110, 255),
+    name_pc    = rgba(150, 205, 255, 255),
+    sub        = rgba(190, 196, 210, 255),
+}
+
+
+local function trail_value(sid, hpp)
+    local t   = trail[sid]
+    local now = os.clock()
+    if t == nil or hpp > t.hpp then
+        trail[sid] = { hpp = hpp, last = hpp, hold = now }
+        return hpp
     end
-    return draw_plate_shapes(dl, sx, sy, p)
+    if hpp < t.last then t.hold = now + 0.6; t.last = hpp end     -- new hit: pause, then drain
+    if now > t.hold then t.hpp = math.max(hpp, t.hpp - 40 * (now - (t.tick or now))) end
+    t.tick = now
+    return t.hpp
+end
+
+local function draw_plate_sleek_shapes(dl, sx, sy, p)
+    local s = 1.0
+    if p.rank == 'boss' then s = s * config.boss_scale end
+    if p.is_target then s = s * config.target_scale end
+
+    local bw = (config.sleek_width or 80) * s
+    local bh = math.max(4, 6 * s)
+    local edge = (p.rank == 'boss' and SLEEK.edge_bs) or (p.rank == 'elite' and SLEEK.edge_el) or SLEEK.edge
+
+    -- vertical layout, bottom-up: debuff rows, bar, name
+    local icon_row = debuff_rows(p.server_id) * (config.icon_size * s + 3) + 1
+    local by2 = sy - 3 - icon_row - 3 * s
+    local by1 = by2 - bh
+    local bx1 = sx - bw / 2
+    local bx2 = sx + bw / 2
+
+    imgui.SetWindowFontScale(0.9 * s)
+    local label = p.level and string.format('Lv %d  %s', p.level, p.name) or p.name
+    local tw, th = text_size(label)
+    local ny = by1 - th - 3 * s
+
+    -- glow (target / engaged) hugs the bar only, so the name stays crisp
+    local gx1, gy1, gx2, gy2 = bx1 - 2 * s, by1 - 1, bx2 + 2 * s, by2 + 1
+    if p.is_target then
+        soft_glow(dl, gx1, gy1, gx2, gy2, 2 * s, p.engaged)
+        target_arrow(dl, sx, ny - 2, s, p.engaged)
+    elseif p.engaged then
+        soft_glow(dl, gx1, gy1, gx2, gy2, 2 * s, true)
+    end
+
+    -- soft dark backing behind the name, fading out to the sides
+    local bw2 = math.max(tw + 40 * s, bw * 0.55)
+    local steps = 8
+    for n = 1, steps do
+        local f = n / steps
+        local half = bw2 / 2 * f
+        dl:AddRectFilled({ sx - half, ny - 1 }, { sx + half, by1 - 2 * s }, rgba(8, 10, 18, math.floor(34 * (1 - f) + 14)), 0)
+    end
+    local name_col = (p.rank == 'boss' and SLEEK.name_bs) or (p.rank == 'elite' and SLEEK.name_el) or SLEEK.name
+    shadow_text(dl, sx - tw / 2, ny, name_col, label)
+
+    imgui.SetWindowFontScale(1.0)
+
+    -- fine metal tips: thin spikes reaching out past both ends, with a tiny diamond
+    local cy  = (by1 + by2) / 2
+    local tip = 14 * s
+    for _, dir in ipairs({ -1, 1 }) do
+        local ex = (dir < 0) and bx1 or bx2
+        dl:AddTriangleFilled({ ex, by1 - 1 }, { ex, by2 + 1 }, { ex + dir * tip, cy }, edge)
+        dl:AddTriangleFilled({ ex, by1 + 1 }, { ex, by2 - 1 }, { ex + dir * (tip - 4 * s), cy }, SLEEK.track)
+        local dx = ex + dir * (tip + 2 * s)
+        local r  = 2.2 * s
+        dl:AddQuadFilled({ dx, cy - r }, { dx + r, cy }, { dx, cy + r }, { dx - r, cy }, edge)
+    end
+
+    -- bar: hairline outline, navy track, trail, fill, bright leading edge
+    dl:AddRectFilled({ bx1 - 1, by1 - 1 }, { bx2 + 1, by2 + 1 }, edge, 0)
+    dl:AddRectFilled({ bx1, by1 }, { bx2, by2 }, SLEEK.track, 0)
+    local w = bx2 - bx1
+    local tv = trail_value(p.server_id, p.hpp)
+    if tv > p.hpp then
+        dl:AddRectFilled({ bx1 + w * p.hpp / 100, by1 }, { bx1 + w * tv / 100, by2 }, SLEEK.trail, 0)
+    end
+    local fw = w * math.max(0, math.min(1, p.hpp / 100))
+    if fw > 0 then
+        local col
+        if config.claim_colours then col = p.color
+        elseif p.is_pc then col = SLEEK.fill_pc
+        elseif p.rank == 'boss' then col = SLEEK.fill_bs
+        else col = SLEEK.fill end
+        dl:AddRectFilled({ bx1, by1 }, { bx1 + fw, by2 }, col, 0)
+        dl:AddRectFilled({ bx1, by1 }, { bx1 + fw, by1 + bh * 0.4 }, COL.gloss, 0)
+        if fw > 4 and p.hpp < 100 then
+            dl:AddRectFilled({ bx1 + fw - 3 * s, by1 }, { bx1 + fw, by2 }, SLEEK.fill_hi, 0)
+        end
+    end
+
+    -- HP % just past the right tip, level with the bar
+    if config.show_hp_text then
+        imgui.SetWindowFontScale(0.75 * s)
+        local pct = string.format('%d%%', p.hpp)
+        local pw, ph = text_size(pct)
+        shadow_text(dl, bx2 + tip + 7 * s, cy - ph / 2, SLEEK.sub, pct)
+        imgui.SetWindowFontScale(1.0)
+    end
+
+    -- thin underline, like the reference
+    dl:AddLine({ bx1 + bw * 0.08, by2 + 2.5 * s }, { bx2 - bw * 0.08, by2 + 2.5 * s }, rgba(205, 210, 222, 70), 1)
+
+    local list = sorted_debuffs(p.server_id)
+    if list ~= nil then
+        draw_debuff_icons(dl, list, sx, by2 + 5 * s, config.icon_size * s, 2)
+    end
+end
+
+-- Sleek style art (assets/sleek_bar_*.png). Measured on the 1300 x 130 source (end spikes shortened).
+local SART = {
+    w = 1300, h = 130,
+    cap_l = 110, cap_r = 1186,                 -- short pointed ends with star ornaments, never stretched
+    top_y = 37,                                -- the bar's top edge
+    main_x1 = 55, main_x2 = 1245, main_y1 = 45, main_y2 = 80,
+    sub_x1  = 62, sub_x2  = 1238, sub_y1  = 91, sub_y2  = 102,
+}
+
+local function draw_plate_sleek(dl, sx, sy, p)
+    local rank = (p.rank == 'boss' and 'boss') or (p.rank == 'elite' and 'elite') or 'normal'
+    local bar   = load_asset('sleek_bar_' .. rank) or load_asset('sleek_bar_normal')
+    if bar == nil then return draw_plate_sleek_shapes(dl, sx, sy, p) end
+
+    local s = 1.0
+    if p.rank == 'boss' then s = s * config.boss_scale end
+    if p.is_target then s = s * config.target_scale end
+
+    -- name box contents first: "Lv 75  Name" and the HP %
+    imgui.SetWindowFontScale(0.76 * s)
+    local lvl_txt = p.level and string.format('Lv %d', p.level) or nil
+    local lw = lvl_txt and (text_size(lvl_txt) + 6 * s) or 0
+    local tw, th = text_size(p.name)
+    imgui.SetWindowFontScale(0.66 * s)
+    local pct_txt = config.show_hp_text and string.format('%d%%', p.hpp) or nil
+    local pw = pct_txt and (text_size(pct_txt) + 6 * s) or 0
+    local line_w = lw + tw + pw
+
+    -- scale: the main bar's inside is sleek_px tall; the bar widens for long names
+    local k  = (config.sleek_px or 5) * s / (SART.main_y2 - SART.main_y1)
+    local bw = math.max((config.sleek_width or 80) * s, line_w + 4 * s)
+    local M  = math.max(10, bw - (SART.cap_l - SART.main_x1) * k - (SART.main_x2 - SART.cap_r) * k)
+    local W  = SART.cap_l * k + M + (SART.w - SART.cap_r) * k
+    local H  = SART.h * k
+
+    -- bottom-up: debuff rows, then the art (its sub bar bottom sits above the icons)
+    local icon_row = debuff_rows(p.server_id) * (config.icon_size * s + 3) + 1
+    local x0 = math.floor(sx - W / 2 + 0.5)                                   -- whole pixels: the hairline
+    local y0 = math.floor(sy - 3 - icon_row - SART.sub_y2 * k - 3 + 0.5)      -- art shimmers at fractions
+    local y1 = y0 + H
+    local function mx(x)
+        if x <= SART.cap_l then return x0 + x * k end
+        if x >= SART.cap_r then return x0 + SART.cap_l * k + M + (x - SART.cap_r) * k end
+        return x0 + SART.cap_l * k + (x - SART.cap_l) / (SART.cap_r - SART.cap_l) * M
+    end
+    local function my(y) return y0 + y * k end
+
+    local ty = my(SART.top_y) - 2 * s - th / 2        -- name line rests just above the bar's top edge
+
+    -- main bar and sub bar rectangles
+    local mx1, mx2 = mx(SART.main_x1), mx(SART.main_x2)
+    local my1, my2 = my(SART.main_y1), my(SART.main_y2)
+    local sx1, sx2 = mx(SART.sub_x1), mx(SART.sub_x2)
+    local sy1, sy2 = my(SART.sub_y1), my(SART.sub_y2)
+
+    -- glow (target / engaged) around the name box and the bar
+    if p.is_target or p.engaged then
+        local red = p.engaged
+        soft_glow(dl, mx1 - 2, my1 - 2, mx2 + 2, sy2 + 1, 2 * s, red)
+    end
+
+    -- bar art (3 slices, joins snapped to whole pixels)
+    local jl = math.floor(mx(SART.cap_l) + 0.5)
+    local jr = math.floor(mx(SART.cap_r) + 0.5)
+    local function slice(a, b, dx1, dx2)
+        if dx2 > dx1 then dl:AddImage(bar.id, { dx1, y0 }, { dx2, y1 }, { a / SART.w, 0 }, { b / SART.w, 1 }) end
+    end
+    slice(0, SART.cap_l, x0, jl)
+    slice(SART.cap_l, SART.cap_r, jl, jr)
+    slice(SART.cap_r, SART.w, jr, x0 + W)
+
+    -- live HP in the main bar
+    local w  = mx2 - mx1
+    local fw = w * math.max(0, math.min(1, p.hpp / 100))
+    if fw > 0 then
+        local col
+        if config.claim_colours then col = p.color
+        elseif p.is_pc then col = SLEEK.fill_pc
+        elseif p.rank == 'boss' then col = SLEEK.fill_bs
+        else col = SLEEK.fill end
+        dl:AddRectFilled({ mx1 + 1, my1 + 1 }, { mx1 + fw - 1, my2 - 1 }, col, 0)
+        dl:AddRectFilled({ mx1 + 1, my1 + 1 }, { mx1 + fw - 1, my1 + (my2 - my1) * 0.4 }, COL.gloss, 0)
+        if fw > 5 and p.hpp < 100 then
+            dl:AddRectFilled({ mx1 + fw - 3 * s, my1 + 1 }, { mx1 + fw - 1, my2 - 1 }, SLEEK.fill_hi, 0)
+        end
+    end
+
+    -- damage trail in the thin sub bar: follows HP, but lags behind after each hit
+    local tv = trail_value(p.server_id, p.hpp)
+    local tw2 = (sx2 - sx1) * math.max(0, math.min(1, tv / 100))
+    if tw2 > 1 then
+        dl:AddRectFilled({ sx1 + 0.5, sy1 + 0.5 }, { sx1 + tw2 - 0.5, sy2 - 0.5 }, SLEEK.trail, 0)
+    end
+
+    if p.is_target then target_arrow(dl, sx, ty - th / 2 - 2, s, p.engaged) end
+
+    -- text: level + name centred over the bar, HP % at the bar's right end
+    local name_col = (p.is_pc and SLEEK.name_pc) or (p.rank == 'boss' and SLEEK.name_bs)
+        or (p.rank == 'elite' and SLEEK.name_el) or SLEEK.name
+    local group = lw + tw
+    -- centred over the bar, nudged left only if it would run into the HP %
+    local tx = math.min(sx - group / 2, mx2 - pw - group)
+    tx = math.max(tx, mx1)
+    imgui.SetWindowFontScale(0.76 * s)
+    if lvl_txt then
+        local _, lh = text_size(lvl_txt)
+        shadow_text(dl, tx, ty - lh / 2, SLEEK.sub, lvl_txt)
+        tx = tx + lw
+    end
+    shadow_text(dl, tx, ty - th / 2, name_col, p.name)
+    if pct_txt then
+        imgui.SetWindowFontScale(0.66 * s)
+        local pw2, ph = text_size(pct_txt)
+        shadow_text(dl, mx2 - pw2, ty - ph / 2 + 1, SLEEK.sub, pct_txt)
+    end
+    imgui.SetWindowFontScale(1.0)
+
+    -- debuffs underneath, 6 per row
+    local list = sorted_debuffs(p.server_id)
+    if list ~= nil then
+        draw_debuff_icons(dl, list, sx, sy2 + 4, config.icon_size * s, 2)
+    end
+end
+
+local function draw_plate(dl, sx, sy, p)
+    if config.style ~= 'gold' then return draw_plate_sleek(dl, sx, sy, p) end
+    local name = (p.rank == 'boss' and 'boss') or (p.rank == 'elite' and 'elite') or 'normal'
+    local tex = load_frame(name) or load_frame('normal')
+    if tex ~= nil then return draw_plate_framed(dl, sx, sy, p, tex) end
+    return draw_plate_shapes(dl, sx, sy, p)    -- only if the frame images are missing
 end
 
 -- Elite / NM classification
@@ -857,8 +1114,17 @@ local function render()
 
     local dev = d3d8.get_device()
     if dev == nil then return end
-    view = read_matrix(dev, 2)   -- D3DTS_VIEW
-    proj = read_matrix(dev, 3)   -- D3DTS_PROJECTION
+    local v_new = read_matrix(dev, 2)   -- D3DTS_VIEW
+    local p_new = read_matrix(dev, 3)   -- D3DTS_PROJECTION
+    -- Only take matrices that look like the 3D world camera (a perspective projection). On frames
+    -- where the game's last draw used some other camera, keep the previous good one instead.
+    if v_new ~= nil and p_new ~= nil and math.abs(p_new[12]) > 0.5 and math.abs(p_new[16]) < 0.5 then
+        view, proj = v_new, p_new
+    elseif view == nil then
+        view, proj = v_new, p_new
+    else
+        diag.skipped = (diag.skipped or 0) + 1
+    end
     diag.frames  = diag.frames + 1
     diag.view_ok = view ~= nil
     diag.proj_ok = proj ~= nil
@@ -927,7 +1193,7 @@ local function render()
                     local name = ent:GetName(i) or '???'
                     local p
                     if is_pc then
-                        p = { level = pt_lvl[i], rank = 'normal', color = COL.bar_green }
+                        p = { level = pt_lvl[i], rank = 'normal', color = COL.bar_green, is_pc = true }
                     else
                         local claim = bit.band(ent:GetClaimStatus(i), 0xFFFF)
                         local color
@@ -1057,7 +1323,7 @@ local function help()
     msg('/np height <n> | distance <n> | scale <n> | width <n> | icons <n> | round <n>')
     msg('/np hp - toggle HP%   /np claim - toggle claim colours   /np clear - clear debuffs')
     msg('/np elite <name> | /np boss <name> - toggle a mob name as elite / NM')
-    msg('/np frames - toggle image frames   /np size <n> - frame height (default 34)')
+    msg('/np style sleek|gold - plate style   /np size <n> - height of the current style (sleek 5, gold 34)')
     msg('/np players - toggle plates on players   /np status - diagnostics')
     msg('/np export - share heights   /np import [merge] - load shared heights')
     msg('/np glow <n> - target glow size (0 = off)   /np pulse - glow pulse   /np arrow - target arrow')
@@ -1123,7 +1389,11 @@ ashita.events.register('command', 'np_command', function (e)
     elseif sub == 'scale' and num then
         config.target_scale = num; msg('Target scale ' .. num)
     elseif sub == 'width' and num then
-        config.plate_width = num; msg('Plate width ' .. num)
+        if config.style ~= 'gold' then
+            config.sleek_width = num; msg('Sleek bar width ' .. num)
+        else
+            config.plate_width = num; msg('Plate width ' .. num)
+        end
     elseif sub == 'round' and num then
         config.bar_rounding = num; msg('Bar rounding ' .. num)
     elseif sub == 'icons' and num then
@@ -1144,11 +1414,12 @@ ashita.events.register('command', 'np_command', function (e)
     elseif sub == 'status' then
         msg(string.format('Camera: view %s, projection %s  |  screen %dx%d  |  frames %d',
             diag.view_ok and 'OK' or 'FAILED', diag.proj_ok and 'OK' or 'FAILED', diag.sw, diag.sh, diag.frames))
+        msg(string.format('Camera frames skipped (not the world camera): %d', diag.skipped or 0))
         msg(string.format('Entities %d, monsters %d, visible %d, in range %d, on screen %d',
             diag.ents, diag.mobs, diag.visible, diag.in_range, diag.projected))
-        msg(string.format('Axis mode %d, height %.1f, distance %d, players %s, frames %s',
+        msg(string.format('Axis mode %d, height %.1f, distance %d, players %s, style %s',
             config.axis_mode, config.head_offset, config.max_distance,
-            config.show_players and 'on' or 'off', config.use_frames and 'on' or 'off'))
+            config.show_players and 'on' or 'off', config.style == 'gold' and 'gold' or 'sleek'))
         do
             local mm  = AshitaCore:GetMemoryManager()
             local tg  = mm:GetTarget()
@@ -1163,8 +1434,9 @@ ashita.events.register('command', 'np_command', function (e)
                     (config.mob_heights and config.mob_heights[name_key(nm)]) and ' (manual)' or ''))
             end
         end
-        local t = load_frame('normal')
-        msg('Frame image: ' .. (t and 'loaded' or ('not found at ' .. addon.path .. '/assets/frame_normal.png')))
+        local file = (config.style == 'gold') and 'frame_normal' or 'sleek_bar_normal'
+        local t = load_asset(file)
+        msg('Bar image: ' .. (t and 'loaded' or ('not found at ' .. addon.path .. '/assets/' .. file .. '.png')))
         if diag.err then msg('Last error: ' .. diag.err) end
         return
     elseif sub == 'gamenames' then
@@ -1174,11 +1446,21 @@ ashita.events.register('command', 'np_command', function (e)
     elseif sub == 'players' then
         config.show_players = not config.show_players
         msg('Player plates ' .. (config.show_players and 'on' or 'off'))
-    elseif sub == 'frames' then
-        config.use_frames = not config.use_frames
-        msg('Image frames ' .. (config.use_frames and 'on' or 'off (shape style)'))
+    elseif sub == 'style' then
+        local st = args[3] and args[3]:lower() or ''
+        if st == 'sleek' or st == 'gold' then
+            config.style = st
+            msg('Style: ' .. st)
+        else
+            msg('Styles: /np style sleek  |  /np style gold')
+            return
+        end
     elseif sub == 'size' and num then
-        config.frame_height = num; msg('Frame height ' .. num)
+        if config.style ~= 'gold' then
+            config.sleek_px = num; msg('Sleek bar height ' .. num)
+        else
+            config.frame_height = num; msg('Frame height ' .. num)
+        end
     elseif sub == 'claim' then
         config.claim_colours = not config.claim_colours
         msg('Claim colours ' .. (config.claim_colours and 'on' or 'off (classic green)'))
